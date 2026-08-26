@@ -1,0 +1,26 @@
+[project]
+name = "solarian-robstride"
+version = "0.1.0"
+description = "Robstride servo actuator and CAN bus plugin for the Solarian robotics framework"
+authors = [
+    {name = "Solarian Contributors", email = "solarian@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "solarian>=0.1.0",
+    "pyserial>=3.5",
+]
+
+[project.entry-points."solarian.actuators"]
+robstride = "solarian_robstride.actuator:RobstrideServo"
+
+[project.entry-points."solarian.actuator_buses"]
+robstride = "solarian_robstride.bus:RobstrideBus"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["solarian_robstride*"]
