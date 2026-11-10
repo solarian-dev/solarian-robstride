@@ -54,3 +54,9 @@ bus Type 6 set-zero command (the adapter GUI “set zero”, or
 
 - Solarian framework (>=0.1.0)
 - pyserial (>=3.5)
+
+## License
+
+[Apache License 2.0](LICENSE). Copyright 2026 PrimaryKey Inc. See [NOTICE](NOTICE).
+
+Solarian and the Solarian logo are trademarks of PrimaryKey Inc. See the [trademark policy](https://github.com/solarian-dev/solarian/blob/main/TRADEMARKS.md).
