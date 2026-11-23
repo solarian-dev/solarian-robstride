@@ -132,6 +132,32 @@ def parse_feedback(can_id: int, data: bytes, params: MotorParams) -> MotorFeedba
     )
 
 
+def encode_motion_control(
+    motor_id: int,
+    position: float,
+    velocity: float,
+    kp: float,
+    kd: float,
+    torque: float,
+    params: MotorParams,
+) -> tuple[int, bytes]:
+    """Type 1 (MIT) command: torque = kp (position - p) + kd (velocity - v) + torque.
+
+    The feed-forward torque rides in the ID's data-area-2 field in place of the
+    host ID; the motor answers with a type 2 feedback frame all the same. Every
+    value is clamped to the motor's range.
+    """
+    data = struct.pack(
+        ">HHHH",
+        float_to_uint16(position, params.p_min, params.p_max),
+        float_to_uint16(velocity, params.v_min, params.v_max),
+        float_to_uint16(kp, params.kp_min, params.kp_max),
+        float_to_uint16(kd, params.kd_min, params.kd_max),
+    )
+    torque_raw = float_to_uint16(torque, params.t_min, params.t_max)
+    return build_can_id(CommType.MOTION_CONTROL, torque_raw, motor_id), data
+
+
 def encode_enable(host_can_id: int, motor_id: int) -> tuple[int, bytes]:
     return build_can_id(CommType.ENABLE, host_can_id, motor_id), bytes(8)
 

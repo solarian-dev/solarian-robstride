@@ -28,6 +28,7 @@ from solarian_robstride.can_codec import (
     encode_disable,
     encode_enable,
     encode_get_device_id,
+    encode_motion_control,
     encode_read_param,
     encode_write_param_float,
     encode_write_param_int,
@@ -63,6 +64,10 @@ READ_ATTEMPTS = 3
 #: How long (s) ``connect`` waits for every motor to answer each disable.
 CONNECT_REPLY_TIMEOUT_S = 0.5
 
+#: Normalized positions of every MIT motor -> feed-forward torque (Nm) per motor,
+#: signed like the normalized positions.
+Feedforward = Callable[[Dict[str, float]], Dict[str, float]]
+
 
 class RobstrideBus(ActuatorBus):
     """Actuator bus for Robstride motors on one USB-CAN serial port."""
@@ -95,6 +100,13 @@ class RobstrideBus(ActuatorBus):
             int(component.cfg.id): name for name, component in components.items()
         }
         self._enabled: set[str] = set()
+        #: name -> (kp, kd) for motors driven in MIT mode; the rest run CSP.
+        self._mit_gains: Dict[str, tuple[float, float]] = {}
+        self._feedforward: Feedforward | None = None
+        #: name -> (target rad, time.monotonic()) last commanded in MIT mode
+        self._mit_targets: Dict[str, tuple[float, float]] = {}
+        #: name -> rad/s an MIT target may move per second
+        self._speed_caps: Dict[str, float] = {}
         if not self.calibration:
             self.calibration = self._default_calibration()
 
@@ -227,6 +239,110 @@ class RobstrideBus(ActuatorBus):
             )
         )
 
+    def use_motion_control(
+        self,
+        gains: Dict[str, tuple[float, float]],
+        feedforward: Feedforward | None = None,
+    ) -> None:
+        """Drive the named motors with type 1 (MIT) frames instead of ``loc_ref``.
+
+        ``gains`` maps each motor to its (kp Nm/rad, kd Nm·s/rad). The motor
+        must already be in run mode ``MOTION_CONTROL``. ``feedforward`` is
+        called on every write with the normalized positions of all MIT motors
+        and returns the torque each needs on top of the spring, such as the
+        torque that holds it against gravity.
+        """
+        self._mit_gains.update(gains)
+        self._feedforward = feedforward
+
+    def set_speed_cap(self, component_names: list[str], rad_per_s: float) -> None:
+        """Bound how fast each motor's target may move.
+
+        A CSP motor enforces this itself through ``limit_spd``. An MIT motor has
+        no such limit, so its commanded target advances at most this far per
+        second toward the requested one.
+        """
+        for name in component_names:
+            if name in self._mit_gains:
+                self._speed_caps[name] = float(rad_per_s)
+            else:
+                self._send(
+                    *encode_write_param_float(
+                        self.host_can_id, self._motor_id(name), ParamIndex.LIMIT_SPD, rad_per_s
+                    )
+                )
+
+    def _write_motion_control(self, raw: Dict[str, float]) -> None:
+        """Command MIT motors toward raw positions, with velocity and torque feed-forward.
+
+        The velocity feed-forward is the target's rate between consecutive
+        writes, so the damping term does not brake a tracked trajectory. After
+        a gap longer than :data:`MAX_POSITION_AGE_S` it is zero and the step
+        is bounded from the measured position instead.
+        """
+        now = time.monotonic()
+        stale = [
+            n for n in raw
+            if now - self._mit_targets.get(n, (0.0, float("-inf")))[1] > MAX_POSITION_AGE_S
+        ]
+        measured = self._read_positions(stale) if stale else {}
+        targets: Dict[str, float] = {}
+        velocities: Dict[str, float] = {}
+        for name, raw_pos in raw.items():
+            params = self._params[name]
+            target = raw_to_radians(raw_pos, params)
+            if name in measured:
+                previous, dt = raw_to_radians(measured[name], params), MAX_POSITION_AGE_S
+            else:
+                previous, at = self._mit_targets[name]
+                dt = now - at
+            cap = self._speed_caps.get(name)
+            if cap is not None:
+                target = min(max(target, previous - cap * dt), previous + cap * dt)
+            targets[name] = target
+            velocities[name] = 0.0 if name in measured or dt <= 0 else (target - previous) / dt
+        torques = self._feedforward_torques(targets)
+        for name, target in targets.items():
+            kp, kd = self._mit_gains[name]
+            self._send(
+                *encode_motion_control(
+                    self._motor_id(name),
+                    target,
+                    velocities[name],
+                    kp,
+                    kd,
+                    torques.get(name, 0.0),
+                    self._params[name],
+                )
+            )
+            self._mit_targets[name] = (target, now)
+
+    def _feedforward_torques(self, targets: Dict[str, float]) -> Dict[str, float]:
+        """Motor-frame feed-forward torque (Nm) for each target, in rad.
+
+        The callback sees every MIT motor, since a joint's gravity load depends
+        on the whole arm: the new target where there is one, else the last
+        target, else the last measured position.
+        """
+        if self._feedforward is None:
+            return {}
+        raw: Dict[str, float] = {}
+        with self._lock:
+            for name in self._mit_gains:
+                params = self._params[name]
+                if name in targets:
+                    raw[name] = radians_to_raw(targets[name], params)
+                elif name in self._mit_targets:
+                    raw[name] = radians_to_raw(self._mit_targets[name][0], params)
+                elif (sample := self._positions.get(self._motor_id(name))) is not None:
+                    raw[name] = sample[0]
+        torques = self._feedforward(self._normalize(raw))
+        return {
+            name: -torque if self.calibration[name].drive_mode else torque
+            for name, torque in torques.items()
+            if name in targets
+        }
+
     @property
     def is_connected(self) -> bool:
         return self._transport is not None and self._transport.is_open
@@ -300,8 +416,12 @@ class RobstrideBus(ActuatorBus):
             raw = dict(by_class[PosData])
             if normalize:
                 raw = self._unnormalize(raw)
+            mit = {n: v for n, v in raw.items() if n in self._mit_gains}
             for name, raw_pos in raw.items():
-                self._write_loc_ref(name, raw_pos)
+                if name not in mit:
+                    self._write_loc_ref(name, raw_pos)
+            if mit:
+                self._write_motion_control(mit)
 
         if TorqueEnableData in by_class:
             for name, enabled in by_class[TorqueEnableData].items():
@@ -515,9 +635,11 @@ class RobstrideBus(ActuatorBus):
         present = self._read_positions(to_enable)
         for name in to_enable:
             motor_id = self._motor_id(name)
+            mit = name in self._mit_gains
             if self._fault_codes.get(motor_id):
                 self._clear_fault(name, motor_id)
-            self._write_loc_ref(name, present[name])
+            if not mit:
+                self._write_loc_ref(name, present[name])
 
             def in_motor_mode(asked: float) -> bool:
                 with self._lock:
@@ -531,7 +653,11 @@ class RobstrideBus(ActuatorBus):
                 in_motor_mode,
                 "the enable",
             )
-            self._write_loc_ref(name, present[name])
+            # An MIT motor is limp until its first command, so it gets one at once.
+            if mit:
+                self._write_motion_control({name: present[name]})
+            else:
+                self._write_loc_ref(name, present[name])
             self._enabled.add(name)
 
     def _clear_fault(self, name: str, motor_id: int) -> None:
@@ -585,6 +711,7 @@ class RobstrideBus(ActuatorBus):
                 failures.append(str(exc))
             else:
                 self._enabled.discard(name)
+                self._mit_targets.pop(name, None)
         if failures:
             raise ConnectionError("; ".join(failures))
 
