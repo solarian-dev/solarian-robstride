@@ -35,6 +35,26 @@ class CommType(IntEnum):
     READ_VERSION = 26
 
 
+#: Type 2 feedback fault bits (bits 16-21 of the ID, so bits 8-13 of data area 2).
+FAULT_BITS: dict[int, str] = {
+    0: "undervoltage",
+    1: "phase overcurrent",
+    2: "overtemperature",
+    3: "magnetic encoder fault",
+    4: "stall overload",
+    5: "not calibrated",
+}
+
+#: Type 2 mode bits (bits 22-23 of the ID).
+MODE_RESET = 0
+MODE_CALIBRATION = 1
+MODE_MOTOR = 2
+
+
+def describe_faults(fault_code: int) -> str:
+    return ", ".join(text for bit, text in FAULT_BITS.items() if fault_code & (1 << bit))
+
+
 class MotorType(IntEnum):
     RS00 = 0
     EL05 = 1

@@ -45,10 +45,11 @@ target, analogous to Feetech `Goal_Position`.
 ## Calibration
 
 Raw position is the protocol uint16 (0–65535) that encodes mechanical radians.
-`solarian calibrate-module` records that span; `raw_to_radians` converts it
-back using the motor model's `p_min` / `p_max`. Set mechanical zero with the
-bus Type 6 set-zero command (the adapter GUI “set zero”, or
-`set_half_turn_homings`) before sweeping limits.
+`solarian calibrate` records that span and a software `center_offset`
+(`Present = (raw − offset) mod CPR` — Robstride has no homing register).
+`raw_to_radians` converts the span using the motor model's `p_min` / `p_max`.
+Type 6 set-zero (the adapter GUI “set zero”) redefines mechanical zero and is
+a separate step if you want it; unwrap/home do not send Type 6.
 
 ## Requirements
 

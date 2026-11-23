@@ -14,6 +14,12 @@ dependencies = [
     "pyserial>=3.5",
 ]
 
+[project.optional-dependencies]
+# Empty: the CH340 USB-CAN adapter is driven over pyserial, which the bus
+# imports at load time. Declared so module plugins can ask for
+# solarian-robstride[hardware] like every other actuator plugin.
+hardware = []
+
 [project.entry-points."solarian.actuators"]
 robstride = "solarian_robstride.actuator:RobstrideServo"
 

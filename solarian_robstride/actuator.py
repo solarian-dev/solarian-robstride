@@ -22,11 +22,12 @@ class RobstrideServo(Servo):
             shoulder_pan = RobstrideServo()
             elbow_flex = RobstrideServo()
 
-    The corresponding :class:`RobstrideBus` is used automatically. YAML
-    ``model`` must be ``rs00``, ``el05``, or ``rs05``.
+    The corresponding :class:`RobstrideBus` is used automatically. Pass
+    ``model`` on the declaration (``rs00``, ``el05``, or ``rs05``).
     """
 
     bus_class = RobstrideBus
+    default_mode = "range_m100_100"
 
     pos = PosData()
     speed = SpeedData()
