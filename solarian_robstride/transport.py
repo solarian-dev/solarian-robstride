@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 FrameCallback = Callable[[int, bytes], None]
 
+#: Least time (s) from one frame's write to the next. Sent back to back, the
+#: adapter loses the motors' replies, up to every reply from some motors of a
+#: six-motor arm; 0.5 ms apart it loses none.
+MIN_FRAME_GAP_S = 0.0005
+
 
 class Ch340Transport:
     """Send/receive 29-bit CAN frames over the Robstride USB-CAN serial adapter."""
@@ -34,6 +39,7 @@ class Ch340Transport:
         self._recv_thread: threading.Thread | None = None
         self._listeners: list[FrameCallback] = []
         self._rx_buf = bytearray()
+        self._last_send = float("-inf")
 
     @classmethod
     def attach(cls, port: str, on_frame: FrameCallback) -> "Ch340Transport":
@@ -94,8 +100,12 @@ class Ch340Transport:
             raise ConnectionError(f"Robstride adapter {self.port} is not open")
         frame = encode_at_frame(can_id, data)
         with self._serial_lock:
+            wait = self._last_send + MIN_FRAME_GAP_S - time.perf_counter()
+            if wait > 0:
+                time.sleep(wait)
             self._serial.write(frame)
             self._serial.flush()
+            self._last_send = time.perf_counter()
 
     def start_receive_thread(self, on_frame: FrameCallback) -> None:
         self._listeners.append(on_frame)

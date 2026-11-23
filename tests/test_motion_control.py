@@ -24,6 +24,7 @@ from solarian_robstride.protocol import (
     MODE_MOTOR,
     CommType,
     ParamIndex,
+    RunMode,
     params_for_model,
 )
 
@@ -38,6 +39,9 @@ class SimulatedMotors:
     def __init__(self, positions: dict[int, float]):
         self.positions = dict(positions)
         self.modes = {motor_id: 0 for motor_id in positions}
+        self.run_modes = {motor_id: int(RunMode.POSITION_CSP) for motor_id in positions}
+        #: run-mode writes to lose, as a busy adapter does
+        self.drop_run_mode_writes = 0
         self.sent: list[tuple[int, bytes]] = []
         self.bus: RobstrideBus
         self.is_open = True
@@ -45,17 +49,29 @@ class SimulatedMotors:
     def send(self, can_id: int, data: bytes) -> None:
         comm_type, _, motor_id = parse_can_id(can_id)
         self.sent.append((can_id, bytes(data)))
+        (index,) = struct.unpack_from("<H", data, 0)
         if comm_type == CommType.ENABLE:
             self.modes[motor_id] = MODE_MOTOR
         elif comm_type == CommType.DISABLE:
             self.modes[motor_id] = 0
         elif comm_type == CommType.MOTION_CONTROL:
+            if self.run_modes[motor_id] != RunMode.MOTION_CONTROL:
+                return
             self.positions[motor_id] = decode_mit(can_id, data)["position"]
+        elif comm_type == CommType.WRITE_PARAM and index == ParamIndex.RUN_MODE:
+            if self.drop_run_mode_writes:
+                self.drop_run_mode_writes -= 1
+                return
+            self.run_modes[motor_id] = data[4]
         elif comm_type == CommType.READ_PARAM:
-            (index,) = struct.unpack_from("<H", data, 0)
             if index == ParamIndex.MECH_POS:
-                reply = struct.pack("<HH", index, 0) + struct.pack("<f", self.positions[motor_id])
-                self.bus._on_frame(build_can_id(CommType.READ_PARAM, motor_id, HOST_CAN_ID), reply)
+                value = struct.pack("<f", self.positions[motor_id])
+            elif index == ParamIndex.RUN_MODE:
+                value = bytes([self.run_modes[motor_id], 0, 0, 0])
+            else:
+                return
+            reply = struct.pack("<HH", index, 0) + value
+            self.bus._on_frame(build_can_id(CommType.READ_PARAM, motor_id, HOST_CAN_ID), reply)
             return
         area2 = (self.modes[motor_id] << 14) | motor_id
         feedback = struct.pack(
@@ -96,7 +112,7 @@ def decode_mit(can_id: int, data: bytes) -> dict[str, float]:
 def clock(monkeypatch):
     clock = SimpleNamespace(now=100.0)
     monkeypatch.setattr(bus_module.time, "monotonic", lambda: clock.now)
-    monkeypatch.setattr(bus_module.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bus_module.time, "sleep", lambda s: setattr(clock, "now", clock.now + s))
     return clock
 
 
@@ -149,6 +165,13 @@ def test_encode_motion_control_clamps_to_the_motor_range():
     fields = decode_mit(can_id, data)
     assert fields["kp"] == pytest.approx(RS00.kp_max)
     assert fields["torque"] == pytest.approx(RS00.t_min)
+
+
+def test_motion_control_mode_is_confirmed_through_a_lost_write(clock):
+    bus, motors = make_bus({1: 0.0, 2: 0.0})
+    motors.drop_run_mode_writes = 1
+    bus.use_motion_control({"j1": (80.0, 4.0), "j2": (80.0, 4.0)})
+    assert motors.run_modes == {1: RunMode.MOTION_CONTROL, 2: RunMode.MOTION_CONTROL}
 
 
 def test_enable_holds_the_present_pose_with_gravity(clock):

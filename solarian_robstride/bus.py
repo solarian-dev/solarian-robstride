@@ -246,12 +246,15 @@ class RobstrideBus(ActuatorBus):
     ) -> None:
         """Drive the named motors with type 1 (MIT) frames instead of ``loc_ref``.
 
-        ``gains`` maps each motor to its (kp Nm/rad, kd Nm·s/rad). The motor
-        must already be in run mode ``MOTION_CONTROL``. ``feedforward`` is
-        called on every write with the normalized positions of all MIT motors
-        and returns the torque each needs on top of the spring, such as the
-        torque that holds it against gravity.
+        ``gains`` maps each motor to its (kp Nm/rad, kd Nm·s/rad). Each motor
+        is put in run mode ``MOTION_CONTROL``, confirmed, so it must be
+        disabled: a motor left in CSP ignores type 1 frames and never answers
+        them. ``feedforward`` is called on every write with the normalized
+        positions of all MIT motors and returns the torque each needs on top
+        of the spring, such as the torque that holds it against gravity.
         """
+        for name in gains:
+            self._set_run_mode(name, RunMode.MOTION_CONTROL)
         self._mit_gains.update(gains)
         self._feedforward = feedforward
 
