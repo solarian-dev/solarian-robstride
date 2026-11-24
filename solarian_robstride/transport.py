@@ -127,16 +127,16 @@ class Ch340Transport:
         self._listeners.clear()
 
     def _receive_loop(self) -> None:
+        ser = self._serial
         while self._recv_running:
             try:
-                chunk = b""
-                with self._serial_lock:
-                    ser = self._serial
-                    if ser is None or not ser.is_open:
-                        break
-                    waiting = ser.in_waiting
-                    if waiting:
-                        chunk = ser.read(waiting)
+                if ser is None or not ser.is_open:
+                    break
+                # Blocks for the first byte, up to the port timeout, and takes
+                # what came with it. Unlocked: pyserial reads and writes one
+                # port from two threads, and polling instead kept the thread
+                # waking every millisecond.
+                chunk = ser.read(ser.in_waiting or 1)
                 if chunk:
                     self._rx_buf.extend(chunk)
                     for can_id, data in extract_at_frames(self._rx_buf):
@@ -145,8 +145,6 @@ class Ch340Transport:
                                 callback(can_id, data)
                             except Exception:
                                 logger.debug("Frame callback failed", exc_info=True)
-                else:
-                    time.sleep(0.001)
             except serial.SerialException:
                 if self._recv_running:
                     logger.warning("Serial error on %s", self.port, exc_info=True)
