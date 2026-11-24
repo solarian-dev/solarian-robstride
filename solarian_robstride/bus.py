@@ -100,6 +100,9 @@ class RobstrideBus(ActuatorBus):
             int(component.cfg.id): name for name, component in components.items()
         }
         self._enabled: set[str] = set()
+        #: Enabled motors whose feedback reports they left motor mode, as a
+        #: motor does on a CAN timeout. Re-enabled on their next write.
+        self._dropped: set[str] = set()
         #: name -> (kp, kd) for motors driven in MIT mode; the rest run CSP.
         self._mit_gains: Dict[str, tuple[float, float]] = {}
         self._feedforward: Feedforward | None = None
@@ -149,10 +152,27 @@ class RobstrideBus(ActuatorBus):
             fb = parse_feedback(can_id, data, self._params[name])
             if fb is None:
                 return
+            dropped = False
             with self._lock:
                 self._feedbacks[motor_id] = fb
                 self._feedback_times[motor_id] = now
                 self._positions[motor_id] = (fb.position_raw, now)
+                if (
+                    name in self._enabled
+                    and fb.mode_state != MODE_MOTOR
+                    and name not in self._dropped
+                ):
+                    self._dropped.add(name)
+                    dropped = True
+            if dropped:
+                logger.warning(
+                    "Robstride motor %d (%s) left motor mode while enabled (mode %d) "
+                    "and is limp; it is re-enabled on its next command. A gap in "
+                    "commands longer than the motor's CAN timeout does this.",
+                    motor_id,
+                    name,
+                    fb.mode_state,
+                )
             self._note_fault(name, motor_id, fb.fault_code)
         elif comm_type == CommType.READ_PARAM:
             read = parse_param_read(can_id, data)
@@ -209,6 +229,18 @@ class RobstrideBus(ActuatorBus):
 
     def _read_positions(self, component_names: list[str]) -> Dict[str, int]:
         """Raw positions no older than :data:`MAX_POSITION_AGE_S`, polling the stale ones."""
+        return {n: raw for n, (raw, _) in self._read_samples(component_names).items()}
+
+    def read_position_times(self, component_names: list[str]) -> Dict[str, float]:
+        """Read positions as :meth:`read` does, and return when each one arrived.
+
+        Times are ``time.monotonic()``. A read returns a cached reply up to
+        :data:`MAX_POSITION_AGE_S` old rather than asking the motor, so how long
+        the read takes says nothing about how old its value is; this does.
+        """
+        return {n: at for n, (_, at) in self._read_samples(component_names).items()}
+
+    def _read_samples(self, component_names: list[str]) -> Dict[str, tuple[int, float]]:
         stale = list(component_names)
         for _ in range(READ_ATTEMPTS):
             asked = time.monotonic()
@@ -229,7 +261,7 @@ class RobstrideBus(ActuatorBus):
             ids = ", ".join(f"{n} (id {self._motor_id(n)})" for n in stale)
             raise ConnectionError(f"No position from Robstride motor(s) {ids} on {self.port}")
         with self._lock:
-            return {n: self._positions[self._motor_id(n)][0] for n in component_names}
+            return {n: self._positions[self._motor_id(n)] for n in component_names}
 
     def _write_loc_ref(self, name: str, raw: float) -> None:
         position_rad = raw_to_radians(raw, self._params[name])
@@ -416,6 +448,11 @@ class RobstrideBus(ActuatorBus):
             by_class.setdefault(value.__class__, {})[name] = value.value
 
         if PosData in by_class:
+            with self._lock:
+                dropped = [n for n in by_class[PosData] if n in self._dropped]
+            if dropped:
+                self._enabled.difference_update(dropped)
+                self.enable_torque(dropped)
             raw = dict(by_class[PosData])
             if normalize:
                 raw = self._unnormalize(raw)
@@ -661,7 +698,9 @@ class RobstrideBus(ActuatorBus):
                 self._write_motion_control({name: present[name]})
             else:
                 self._write_loc_ref(name, present[name])
-            self._enabled.add(name)
+            with self._lock:
+                self._enabled.add(name)
+                self._dropped.discard(name)
 
     def _clear_fault(self, name: str, motor_id: int) -> None:
         logger.warning(
@@ -694,6 +733,12 @@ class RobstrideBus(ActuatorBus):
         failures = []
         for name in component_names:
             motor_id = self._motor_id(name)
+            # Out of _enabled before the disable goes, or its own reply would
+            # read as the motor dropping out.
+            with self._lock:
+                was_enabled = name in self._enabled
+                self._enabled.discard(name)
+                self._dropped.discard(name)
 
             def released(asked: float, motor_id=motor_id) -> bool:
                 with self._lock:
@@ -712,8 +757,9 @@ class RobstrideBus(ActuatorBus):
                 )
             except ConnectionError as exc:
                 failures.append(str(exc))
+                if was_enabled:
+                    self._enabled.add(name)
             else:
-                self._enabled.discard(name)
                 self._mit_targets.pop(name, None)
         if failures:
             raise ConnectionError("; ".join(failures))

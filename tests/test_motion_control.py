@@ -57,7 +57,8 @@ class SimulatedMotors:
         elif comm_type == CommType.MOTION_CONTROL:
             if self.run_modes[motor_id] != RunMode.MOTION_CONTROL:
                 return
-            self.positions[motor_id] = decode_mit(can_id, data)["position"]
+            if self.modes[motor_id] == MODE_MOTOR:
+                self.positions[motor_id] = decode_mit(can_id, data)["position"]
         elif comm_type == CommType.WRITE_PARAM and index == ParamIndex.RUN_MODE:
             if self.drop_run_mode_writes:
                 self.drop_run_mode_writes -= 1
@@ -263,6 +264,48 @@ def test_csp_motors_keep_loc_ref_and_limit_spd(clock):
     assert motors.param_writes(2, ParamIndex.LIMIT_SPD) == [pytest.approx(1.5)]
     assert motors.param_writes(2, ParamIndex.LOC_REF)[-1] == pytest.approx(0.01, abs=TICK)
     assert len(motors.mit(1)) == 2
+
+
+def test_a_motor_that_drops_out_is_re_enabled_holding_where_it_is(clock, caplog):
+    bus, motors = make_bus({1: 0.0})
+    bus.use_motion_control({"j1": (80.0, 4.0)})
+    bus.enable_torque(["j1"])
+    # A CAN timeout: the motor resets, and sags while limp.
+    motors.modes[1] = 0
+    motors.positions[1] = -0.1
+    clock.now += 0.01
+    write_rad(bus, {"j1": 0.01})
+    assert motors.positions[1] == -0.1
+    assert "left motor mode" in caplog.text
+
+    clock.now += 0.01
+    write_rad(bus, {"j1": 0.02})
+    assert motors.modes[1] == MODE_MOTOR
+    hold, step = motors.mit(1)[-2:]
+    assert hold["position"] == pytest.approx(-0.1, abs=TICK)
+    assert step["position"] == pytest.approx(0.02, abs=TICK)
+
+
+def test_disabling_is_not_read_as_dropping_out(clock, caplog):
+    bus, motors = make_bus({1: 0.0})
+    bus.use_motion_control({"j1": (80.0, 4.0)})
+    bus.enable_torque(["j1"])
+    bus.disable_torque(["j1"])
+    write_rad(bus, {"j1": 0.01})
+    assert "left motor mode" not in caplog.text
+    assert motors.modes[1] == 0
+
+
+def test_position_times_are_when_the_cached_reply_arrived(clock):
+    bus, motors = make_bus({1: 0.0})
+    bus.use_motion_control({"j1": (80.0, 4.0)})
+    bus.enable_torque(["j1"])
+    arrived = clock.now
+    clock.now += MAX_POSITION_AGE_S / 2
+    assert bus.read_position_times(["j1"]) == {"j1": arrived}
+    clock.now += MAX_POSITION_AGE_S
+    asked = clock.now
+    assert bus.read_position_times(["j1"]) == {"j1": asked}
 
 
 def test_disable_forgets_the_last_target(clock):
