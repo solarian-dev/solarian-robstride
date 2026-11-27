@@ -30,6 +30,7 @@ from solarian_robstride.can_codec import (
     encode_get_device_id,
     encode_motion_control,
     encode_read_param,
+    encode_save_params,
     encode_write_param_float,
     encode_write_param_int,
     parse_can_id,
@@ -89,6 +90,10 @@ class RobstrideBus(ActuatorBus):
         self._positions: Dict[int, tuple[int, float]] = {}
         #: motor id -> (run mode read back, time.monotonic() it arrived)
         self._run_modes: Dict[int, tuple[int, float]] = {}
+        #: motor id -> (zero_sta read back, time.monotonic() it arrived)
+        self._zero_stas: Dict[int, tuple[int, float]] = {}
+        #: motor id -> time.monotonic() of its last type 0 (MCU UID) frame
+        self._uid_times: Dict[int, float] = {}
         #: motor id -> supply voltage (V) it last reported
         self._vbus: Dict[int, float] = {}
         self._fault_codes: Dict[int, int] = {}
@@ -187,10 +192,16 @@ class RobstrideBus(ActuatorBus):
             elif index == ParamIndex.RUN_MODE:
                 with self._lock:
                     self._run_modes[motor_id] = (value[0], now)
+            elif index == ParamIndex.ZERO_STA:
+                with self._lock:
+                    self._zero_stas[motor_id] = (value[0], now)
             elif index == ParamIndex.VBUS:
                 (volts,) = struct.unpack("<f", value)
                 with self._lock:
                     self._vbus[motor_id] = volts
+        elif comm_type == CommType.GET_DEVICE_ID:
+            with self._lock:
+                self._uid_times[motor_id] = now
         elif comm_type == CommType.FAULT_FEEDBACK:
             logger.warning(
                 "Robstride motor %d (%s) reported fault frame %s", motor_id, name, data.hex()
@@ -779,6 +790,54 @@ class RobstrideBus(ActuatorBus):
             return read is not None and read[1] >= asked and read[0] == int(mode)
 
         self._send_confirmed(name, send, took, f"run mode {mode.name}")
+
+    def centre_power_up_positions(self, component_names: list[str]) -> list[str]:
+        """Have each motor report -pi..pi after power-up instead of its factory 0..2pi.
+
+        A motor counts turns only while powered; ``zero_sta`` picks the window its
+        first reading falls in. With 0..2pi a joint resting a hair below its
+        motor's zero powers up reading almost 2pi, a full turn from where its
+        calibration expects it, and the next command spins it back. The value is
+        saved to flash and applies from the next power-up. Returns the motors
+        that had to change; each must be disabled.
+        """
+        changed = []
+        for name in component_names:
+            motor_id = self._motor_id(name)
+
+            def read() -> None:
+                self._send(*encode_read_param(self.host_can_id, motor_id, ParamIndex.ZERO_STA))
+
+            def answered(asked: float, want: int | None = None) -> bool:
+                with self._lock:
+                    got = self._zero_stas.get(motor_id)
+                return got is not None and got[1] >= asked and (want is None or got[0] == want)
+
+            self._send_confirmed(name, read, answered, "a zero_sta read")
+            if self._zero_stas[motor_id][0] == 1:
+                continue
+
+            def write() -> None:
+                self._send(
+                    *encode_write_param_int(self.host_can_id, motor_id, ParamIndex.ZERO_STA, 1)
+                )
+                read()
+
+            # The save is answered with a type 0 frame (the MCU UID), not with
+            # the type 2 feedback the vendor's protocol notes describe.
+            def saved(asked: float) -> bool:
+                with self._lock:
+                    return self._uid_times.get(motor_id, float("-inf")) >= asked
+
+            self._send_confirmed(name, write, lambda asked: answered(asked, 1), "zero_sta 1")
+            self._send_confirmed(
+                name,
+                lambda: self._send(*encode_save_params(self.host_can_id, motor_id)),
+                saved,
+                "the parameter save",
+            )
+            changed.append(name)
+        return changed
 
     def _send_confirmed(
         self,

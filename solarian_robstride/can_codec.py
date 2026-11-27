@@ -176,6 +176,11 @@ def encode_set_zero(host_can_id: int, motor_id: int) -> tuple[int, bytes]:
     return build_can_id(CommType.SET_ZERO, host_can_id, motor_id), bytes([1]) + bytes(7)
 
 
+def encode_save_params(host_can_id: int, motor_id: int) -> tuple[int, bytes]:
+    """Type 22: keep every parameter written with type 18 across a power cycle."""
+    return build_can_id(CommType.SAVE_PARAMS, host_can_id, motor_id), bytes(range(1, 9))
+
+
 def encode_write_param_float(host_can_id: int, motor_id: int, param_index: int, value: float) -> tuple[int, bytes]:
     data = struct.pack("<HBx", int(param_index) & 0xFFFF, 0) + struct.pack("<f", float(value))
     return build_can_id(CommType.WRITE_PARAM, host_can_id, motor_id), data

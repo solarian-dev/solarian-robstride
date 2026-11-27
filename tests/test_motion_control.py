@@ -40,6 +40,9 @@ class SimulatedMotors:
         self.positions = dict(positions)
         self.modes = {motor_id: 0 for motor_id in positions}
         self.run_modes = {motor_id: int(RunMode.POSITION_CSP) for motor_id in positions}
+        #: power-up position window: 0 is the factory 0..2pi, 1 is -pi..pi
+        self.zero_stas = {motor_id: 0 for motor_id in positions}
+        self.saves = {motor_id: 0 for motor_id in positions}
         #: run-mode writes to lose, as a busy adapter does
         self.drop_run_mode_writes = 0
         self.sent: list[tuple[int, bytes]] = []
@@ -64,11 +67,20 @@ class SimulatedMotors:
                 self.drop_run_mode_writes -= 1
                 return
             self.run_modes[motor_id] = data[4]
+        elif comm_type == CommType.WRITE_PARAM and index == ParamIndex.ZERO_STA:
+            self.zero_stas[motor_id] = data[4]
+        elif comm_type == CommType.SAVE_PARAMS:
+            self.saves[motor_id] += 1
+            uid = build_can_id(CommType.GET_DEVICE_ID, motor_id, 0xFE)
+            self.bus._on_frame(uid, bytes.fromhex("595730211831b607"))
+            return
         elif comm_type == CommType.READ_PARAM:
             if index == ParamIndex.MECH_POS:
                 value = struct.pack("<f", self.positions[motor_id])
             elif index == ParamIndex.RUN_MODE:
                 value = bytes([self.run_modes[motor_id], 0, 0, 0])
+            elif index == ParamIndex.ZERO_STA:
+                value = bytes([self.zero_stas[motor_id], 0, 0, 0])
             else:
                 return
             reply = struct.pack("<HH", index, 0) + value

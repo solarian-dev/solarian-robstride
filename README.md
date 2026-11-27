@@ -51,6 +51,13 @@ Raw position is the protocol uint16 (0–65535) that encodes mechanical radians.
 Type 6 set-zero (the adapter GUI “set zero”) redefines mechanical zero and is
 a separate step if you want it; unwrap/home do not send Type 6.
 
+A motor counts turns only while powered: its first reading after power-up
+falls in 0..2pi (`zero_sta` 0, the factory value) or -pi..pi (`zero_sta` 1).
+A joint whose rest pose sits at its motor's zero needs -pi..pi, or it powers
+up a turn away from its `center_offset` whenever it rests just below zero.
+`RobstrideBus.centre_power_up_positions` sets and saves it, effective from
+the next power-up.
+
 ## Requirements
 
 - Solarian framework (>=0.1.0)
