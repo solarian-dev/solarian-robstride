@@ -1,6 +1,6 @@
 [project]
 name = "solarian-robstride"
-version = "0.1.0"
+version = "0.1.1"
 description = "Robstride servo actuator and CAN bus plugin for the Solarian robotics framework"
 authors = [
     {name = "Raul Garreta", email = "raul@solarian.dev"}
@@ -10,7 +10,7 @@ license = {text = "Apache-2.0"}
 classifiers = ["License :: OSI Approved :: Apache Software License"]
 requires-python = ">=3.10"
 dependencies = [
-    "solarian>=0.6.0",
+    "solarian>=0.7.0",
     "pyserial>=3.5",
 ]
 
